@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     )
     db_user: str = Field(default="postgres", validation_alias="DB_USER")
     db_password: SecretStr = Field(validation_alias="DB_PASSWORD")
+    jwt_secret_key: SecretStr = Field(validation_alias="JWT_SECRET_KEY")
+    jwt_algorithm: Literal["HS256"] = Field(
+        default="HS256",
+        validation_alias="JWT_ALGORITHM",
+    )
+    access_token_expire_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=1440,
+        validation_alias="ACCESS_TOKEN_EXPIRE_MINUTES",
+    )
 
 
 @lru_cache(maxsize=1)

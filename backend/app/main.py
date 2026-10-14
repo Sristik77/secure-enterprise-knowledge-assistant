@@ -1,5 +1,6 @@
-﻿from fastapi import FastAPI
+from fastapi import FastAPI
 
+from app.api.auth import router as auth_router
 from app.core.config import get_settings
 
 
@@ -20,6 +21,8 @@ def create_app() -> FastAPI:
     def health_live() -> dict[str, str]:
         """Report whether the API process is running."""
         return {"status": "ok"}
+
+    application.include_router(auth_router)
 
     return application
 
