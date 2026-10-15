@@ -737,3 +737,219 @@ def test_document_upload_does_not_persist_when_embedding_fails(
 
     documents_after = set(integration_session.scalars(select(Document.id)).all())
     assert documents_after == documents_before
+
+# Semantic search integration tests
+
+
+def set_test_embedding(
+    session: Session,
+    document: Document,
+    vector: list[float],
+) -> None:
+    """Assign a deterministic vector to the document's first chunk."""
+    chunk = session.scalar(
+        select(DocumentChunk).where(
+            DocumentChunk.document_id == document.id
+        )
+    )
+    assert chunk is not None
+    assert len(vector) == 384
+    chunk.embedding = vector
+    session.flush()
+
+
+def test_search_requires_authentication(
+    integration_client: TestClient,
+) -> None:
+    response = integration_client.post(
+        "/search",
+        json={"query": "employee security"},
+    )
+    assert response.status_code == 401
+
+
+def test_search_returns_semantically_ranked_accessible_chunks(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import retrieval
+
+    _, owner, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+
+    relevant = create_test_document(
+        integration_session, owner, title="Relevant security document"
+    )
+    less_relevant = create_test_document(
+        integration_session, owner, title="Less relevant document"
+    )
+
+    query_vector = [1.0] + [0.0] * 383
+    similar_vector = [0.9, (1 - 0.9**2) ** 0.5] + [0.0] * 382
+    unrelated_vector = [0.0, 1.0] + [0.0] * 382
+
+    set_test_embedding(integration_session, relevant, similar_vector)
+    set_test_embedding(integration_session, less_relevant, unrelated_vector)
+
+    monkeypatch.setattr(
+        retrieval,
+        "embed_texts",
+        lambda texts: [query_vector],
+    )
+
+    response = integration_client.post(
+        "/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "security policy", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert body["results"][0]["document_id"] == str(relevant.id)
+    assert body["results"][1]["document_id"] == str(less_relevant.id)
+    assert body["results"][0]["similarity"] > body["results"][1]["similarity"]
+
+
+def test_search_returns_empty_results_when_no_chunks_have_embeddings(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import retrieval
+
+    _, owner, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    create_test_document(integration_session, owner)
+
+    monkeypatch.setattr(
+        retrieval,
+        "embed_texts",
+        lambda texts: [[1.0] + [0.0] * 383],
+    )
+
+    response = integration_client.post(
+        "/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "anything"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+    assert response.json()["results"] == []
+
+
+def test_search_does_not_return_documents_without_read_permission(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import retrieval
+
+    _, owner, _ = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    _, reader, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+
+    private_document = create_test_document(
+        integration_session, owner, title="Private security document"
+    )
+    set_test_embedding(
+        integration_session,
+        private_document,
+        [1.0] + [0.0] * 383,
+    )
+
+    monkeypatch.setattr(
+        retrieval,
+        "embed_texts",
+        lambda texts: [[1.0] + [0.0] * 383],
+    )
+
+    response = integration_client.post(
+        "/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "private security"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+    assert all(
+        item["document_id"] != str(private_document.id)
+        for item in response.json()["results"]
+    )
+
+
+def test_search_allows_documents_granted_through_role(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import retrieval
+
+    _, owner, _ = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    _, reader, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+
+    document = create_test_document(
+        integration_session, owner, title="Shared security policy"
+    )
+    set_test_embedding(
+        integration_session,
+        document,
+        [1.0] + [0.0] * 383,
+    )
+
+    role = Role(name=f"search_reader_{uuid4().hex[:12]}")
+    integration_session.add(role)
+    integration_session.flush()
+
+    integration_session.add_all(
+        [
+            UserRole(user_id=reader.id, role_id=role.id),
+            DocumentPermission(
+                document_id=document.id,
+                role_id=role.id,
+                can_read=True,
+            ),
+        ]
+    )
+    integration_session.flush()
+
+    monkeypatch.setattr(
+        retrieval,
+        "embed_texts",
+        lambda texts: [[1.0] + [0.0] * 383],
+    )
+
+    response = integration_client.post(
+        "/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "shared security policy"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["results"][0]["document_id"] == str(document.id)
+
+
+def test_search_rejects_blank_query(
+    integration_client: TestClient,
+) -> None:
+    token = authenticated_user_token(integration_client)
+
+    response = integration_client.post(
+        "/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "   "},
+    )
+
+    assert response.status_code == 422

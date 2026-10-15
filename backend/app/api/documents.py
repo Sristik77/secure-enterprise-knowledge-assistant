@@ -1,7 +1,7 @@
-﻿from uuid import UUID
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
@@ -12,6 +12,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.services.document_access import readable_document_filter
 from app.schemas.documents import (
     DocumentDetailResponse,
     DocumentSummaryResponse,
@@ -19,28 +20,6 @@ from app.schemas.documents import (
 
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
-
-
-def readable_document_filter(user_id: UUID):
-    """Match documents owned by a user or readable through any assigned role."""
-    role_permission = (
-        select(DocumentPermission.id)
-        .join(
-            UserRole,
-            UserRole.role_id == DocumentPermission.role_id,
-        )
-        .where(
-            DocumentPermission.document_id == Document.id,
-            DocumentPermission.can_read.is_(True),
-            UserRole.user_id == user_id,
-        )
-        .exists()
-    )
-
-    return or_(
-        Document.owner_id == user_id,
-        role_permission,
-    )
 
 
 @router.get("", response_model=list[DocumentSummaryResponse])

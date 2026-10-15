@@ -3,6 +3,7 @@ from app.api.document_uploads import router as document_uploads_router
 from app.api.admin import router as admin_router
 from app.api.documents import router as documents_router
 from app.api.auth import router as auth_router
+from app.api.search import router as search_router
 from app.core.config import get_settings
 
 
@@ -28,6 +29,7 @@ def create_app() -> FastAPI:
     application.include_router(admin_router)
     application.include_router(documents_router)
     application.include_router(document_uploads_router)
+    application.include_router(search_router)
 
     return application
 
