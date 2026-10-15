@@ -1,3 +1,4 @@
+
 from pathlib import PurePath
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from app.services.document_ingestion import (
     chunk_text,
     extract_text,
 )
+from app.services.embeddings import EmbeddingError, embed_texts
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -38,7 +40,7 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Document:
-    """Extract, chunk, and store an authenticated user's document."""
+    """Extract, embed, and store an authenticated user's document."""
 
     original_name = (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
 
@@ -74,21 +76,30 @@ async def upload_document(
                 "No readable text was found in the uploaded document."
             )
 
+        # Generate all embeddings before adding anything to the database.
+        embeddings = embed_texts(chunks)
+
+        if len(embeddings) != len(chunks):
+            raise EmbeddingError(
+                "The embedding service returned an unexpected number of vectors."
+            )
+
         document = Document(
             id=uuid4(),
             title=(title or "").strip() or PurePath(original_name).stem,
             source_name=original_name[:500],
             content_type=CONTENT_TYPES[extension],
             owner_id=current_user.id,
-            metadata_json={
-                "original_extension": extension,
-                "chunk_count": len(chunks),
-            },
+            metadata_json={"original_extension": extension, "chunk_count": len(chunks)},
         )
 
         document.chunks = [
-            DocumentChunk(chunk_index=index, content=chunk)
-            for index, chunk in enumerate(chunks)
+            DocumentChunk(
+                chunk_index=index,
+                content=chunk,
+                embedding=embedding,
+            )
+            for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
         ]
 
         db.add(document)
@@ -101,6 +112,13 @@ async def upload_document(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
+        ) from exc
+
+    except EmbeddingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Document embedding is temporarily unavailable. Please retry.",
         ) from exc
 
     except HTTPException:

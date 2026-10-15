@@ -49,7 +49,7 @@ def integration_session() -> Generator[Session, None, None]:
         revision = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one_or_none()
-        expected_revision = "256fb3c7f951"
+        expected_revision = "a13c8e6f4b21"
         if revision != expected_revision:
             raise RuntimeError(
                 f"Expected Alembic revision {expected_revision!r}, "
@@ -558,10 +558,21 @@ def authenticated_user_token(client: TestClient) -> str:
     return login.json()["access_token"]
 
 
+
 def test_document_upload_persists_document_and_chunks(
     integration_client: TestClient,
     integration_session: Session,
+    monkeypatch,
 ) -> None:
+    """Verify uploaded documents and their embeddings are persisted."""
+    from app.api import document_uploads
+
+    monkeypatch.setattr(
+        document_uploads,
+        "embed_texts",
+        lambda texts: [[0.01] * 384 for _ in texts],
+    )
+
     token = authenticated_user_token(integration_client)
 
     response = integration_client.post(
@@ -589,6 +600,10 @@ def test_document_upload_persists_document_and_chunks(
     assert stored_document.owner_id == UUID(result["owner_id"])
     assert len(stored_document.chunks) == 1
     assert stored_document.chunks[0].chunk_index == 0
+
+    stored_embedding = stored_document.chunks[0].embedding
+    assert stored_embedding is not None
+    assert len(stored_embedding) == 384
 
 
 def test_document_upload_requires_authentication(
@@ -650,3 +665,75 @@ def test_document_upload_rejects_oversized_file(
     )
 
     assert response.status_code == 413
+
+
+def test_document_upload_does_not_persist_when_embedding_fails(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch,
+) -> None:
+    """A failed embedding operation must not save a partial document."""
+    from app.api import document_uploads
+    from app.services.embeddings import EmbeddingError
+
+    def fail_embedding(texts):
+        raise EmbeddingError("Simulated embedding failure")
+
+    monkeypatch.setattr(document_uploads, "embed_texts", fail_embedding)
+
+    token = authenticated_user_token(integration_client)
+    documents_before = set(integration_session.scalars(select(Document.id)).all())
+
+    response = integration_client.post(
+        "/documents",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Must Not Be Saved"},
+        files={
+            "file": (
+                "failure-test.txt",
+                b"Testing embedding failure handling.",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 503, response.text
+
+    documents_after = set(integration_session.scalars(select(Document.id)).all())
+    assert documents_after == documents_before
+
+
+def test_document_upload_does_not_persist_when_embedding_fails(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch,
+) -> None:
+    """A failed embedding operation must not save a partial document."""
+    from app.api import document_uploads
+    from app.services.embeddings import EmbeddingError
+
+    def fail_embedding(texts):
+        raise EmbeddingError("Simulated embedding failure")
+
+    monkeypatch.setattr(document_uploads, "embed_texts", fail_embedding)
+
+    token = authenticated_user_token(integration_client)
+    documents_before = set(integration_session.scalars(select(Document.id)).all())
+
+    response = integration_client.post(
+        "/documents",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Must Not Be Saved"},
+        files={
+            "file": (
+                "failure-test.txt",
+                b"Testing embedding failure handling.",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 503, response.text
+
+    documents_after = set(integration_session.scalars(select(Document.id)).all())
+    assert documents_after == documents_before
