@@ -13,7 +13,7 @@ from app.core.database import get_db
 from app.core.security import verify_password
 from app.main import app
 from app.api.deps import require_roles
-from app.models import Role, User, UserRole
+from app.models import Document, DocumentChunk, DocumentPermission, Role, User, UserRole
 
 
 TEST_DATABASE = "secure_knowledge_assistant_test"
@@ -312,3 +312,229 @@ def test_admin_users_allows_admin_and_hides_password_hashes(
     assert returned_user["full_name"] == payload["full_name"]
     assert "password_hash" not in returned_user
     assert all("password_hash" not in item for item in users)
+
+
+def create_authenticated_test_user(
+    client: TestClient,
+    session: Session,
+) -> tuple[dict[str, str], User, str]:
+    """Register a test user and return its payload, database row, and JWT."""
+    payload = registration_payload()
+
+    registration = client.post("/auth/register", json=payload)
+    assert registration.status_code == 201
+
+    user = session.scalar(
+        select(User).where(User.email == payload["email"])
+    )
+    assert user is not None
+
+    login = client.post(
+        "/auth/login",
+        json={
+            "email": payload["email"],
+            "password": payload["password"],
+        },
+    )
+    assert login.status_code == 200
+
+    return payload, user, login.json()["access_token"]
+
+
+def create_test_document(
+    session: Session,
+    owner: User,
+    *,
+    title: str = "Confidential test document",
+) -> Document:
+    """Create a document and a text chunk in the integration database."""
+    document = Document(
+        title=title,
+        source_name=f"{title}.txt",
+        content_type="text/plain",
+        owner_id=owner.id,
+        metadata_json={},
+    )
+    session.add(document)
+    session.flush()
+
+    session.add(
+        DocumentChunk(
+            document_id=document.id,
+            chunk_index=0,
+            content="Confidential integration-test content.",
+        )
+    )
+    session.flush()
+
+    return document
+
+
+def test_document_owner_can_list_and_read_document(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, owner, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    document = create_test_document(integration_session, owner)
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    listing = integration_client.get("/documents", headers=headers)
+    assert listing.status_code == 200
+    assert any(item["id"] == str(document.id) for item in listing.json())
+
+    response = integration_client.get(
+        f"/documents/{document.id}",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["id"] == str(document.id)
+    assert response.json()["chunks"][0]["content"] == (
+        "Confidential integration-test content."
+    )
+    assert "embedding" not in response.json()["chunks"][0]
+
+
+def test_document_role_permission_grants_read_access(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, owner, _ = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    _, reader, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    document = create_test_document(integration_session, owner)
+
+    role = Role(name=f"doc_reader_{uuid4().hex[:12]}")
+    integration_session.add(role)
+    integration_session.flush()
+
+    integration_session.add(
+        UserRole(user_id=reader.id, role_id=role.id)
+    )
+    integration_session.add(
+        DocumentPermission(
+            document_id=document.id,
+            role_id=role.id,
+            can_read=True,
+        )
+    )
+    integration_session.flush()
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    listing = integration_client.get("/documents", headers=headers)
+    assert listing.status_code == 200
+    assert any(item["id"] == str(document.id) for item in listing.json())
+
+    response = integration_client.get(
+        f"/documents/{document.id}",
+        headers=headers,
+    )
+    assert response.status_code == 200
+
+
+def test_user_without_permission_cannot_list_or_read_document(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, owner, _ = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    _, reader, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    document = create_test_document(integration_session, owner)
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    listing = integration_client.get("/documents", headers=headers)
+    assert listing.status_code == 200
+    assert all(item["id"] != str(document.id) for item in listing.json())
+
+    response = integration_client.get(
+        f"/documents/{document.id}",
+        headers=headers,
+    )
+    assert response.status_code == 404
+
+
+def test_document_permission_with_can_read_false_denies_access(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, owner, _ = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    _, reader, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    document = create_test_document(integration_session, owner)
+
+    role = Role(name=f"doc_denied_{uuid4().hex[:12]}")
+    integration_session.add(role)
+    integration_session.flush()
+
+    integration_session.add(
+        UserRole(user_id=reader.id, role_id=role.id)
+    )
+    integration_session.add(
+        DocumentPermission(
+            document_id=document.id,
+            role_id=role.id,
+            can_read=False,
+        )
+    )
+    integration_session.flush()
+
+    response = integration_client.get(
+        f"/documents/{document.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 404
+
+
+def test_multiple_roles_grant_access_if_any_role_allows_reading(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, owner, _ = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    _, reader, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    document = create_test_document(integration_session, owner)
+
+    denied_role = Role(name=f"doc_no_{uuid4().hex[:12]}")
+    allowed_role = Role(name=f"doc_yes_{uuid4().hex[:12]}")
+    integration_session.add_all([denied_role, allowed_role])
+    integration_session.flush()
+
+    integration_session.add_all(
+        [
+            UserRole(user_id=reader.id, role_id=denied_role.id),
+            UserRole(user_id=reader.id, role_id=allowed_role.id),
+            DocumentPermission(
+                document_id=document.id,
+                role_id=denied_role.id,
+                can_read=False,
+            ),
+            DocumentPermission(
+                document_id=document.id,
+                role_id=allowed_role.id,
+                can_read=True,
+            ),
+        ]
+    )
+    integration_session.flush()
+
+    response = integration_client.get(
+        f"/documents/{document.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
