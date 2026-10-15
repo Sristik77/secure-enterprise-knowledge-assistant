@@ -1,5 +1,5 @@
 from collections.abc import Generator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -538,3 +538,115 @@ def test_multiple_roles_grant_access_if_any_role_allows_reading(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
+
+def authenticated_user_token(client: TestClient) -> str:
+    """Register a fresh user and return a valid access token."""
+    payload = registration_payload()
+
+    registration = client.post("/auth/register", json=payload)
+    assert registration.status_code == 201
+
+    login = client.post(
+        "/auth/login",
+        json={
+            "email": payload["email"],
+            "password": payload["password"],
+        },
+    )
+    assert login.status_code == 200
+
+    return login.json()["access_token"]
+
+
+def test_document_upload_persists_document_and_chunks(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    token = authenticated_user_token(integration_client)
+
+    response = integration_client.post(
+        "/documents",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Integration Test Document"},
+        files={
+            "file": (
+                "notes.txt",
+                b"Enterprise security documentation for integration testing.",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["title"] == "Integration Test Document"
+    assert result["source_name"] == "notes.txt"
+    assert len(result["chunks"]) == 1
+    assert "Enterprise security documentation" in result["chunks"][0]["content"]
+
+    stored_document = integration_session.get(Document, result["id"])
+    assert stored_document is not None
+    assert stored_document.owner_id == UUID(result["owner_id"])
+    assert len(stored_document.chunks) == 1
+    assert stored_document.chunks[0].chunk_index == 0
+
+
+def test_document_upload_requires_authentication(
+    integration_client: TestClient,
+) -> None:
+    response = integration_client.post(
+        "/documents",
+        files={"file": ("notes.txt", b"Private document content.", "text/plain")},
+    )
+
+    assert response.status_code == 401
+
+
+def test_document_upload_rejects_unsupported_file_type(
+    integration_client: TestClient,
+) -> None:
+    token = authenticated_user_token(integration_client)
+
+    response = integration_client.post(
+        "/documents",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("payload.exe", b"not a supported document", "application/octet-stream")},
+    )
+
+    assert response.status_code == 415
+
+
+def test_document_upload_rejects_empty_file(
+    integration_client: TestClient,
+) -> None:
+    token = authenticated_user_token(integration_client)
+
+    response = integration_client.post(
+        "/documents",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("empty.txt", b"", "text/plain")},
+    )
+
+    assert response.status_code == 400
+
+
+def test_document_upload_rejects_oversized_file(
+    integration_client: TestClient,
+) -> None:
+    from app.services.document_ingestion import MAX_FILE_SIZE_BYTES
+
+    token = authenticated_user_token(integration_client)
+
+    response = integration_client.post(
+        "/documents",
+        headers={"Authorization": f"Bearer {token}"},
+        files={
+            "file": (
+                "large.txt",
+                b"x" * (MAX_FILE_SIZE_BYTES + 1),
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 413

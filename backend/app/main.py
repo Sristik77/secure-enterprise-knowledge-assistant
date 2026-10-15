@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-
+from app.api.document_uploads import router as document_uploads_router
 from app.api.admin import router as admin_router
 from app.api.documents import router as documents_router
 from app.api.auth import router as auth_router
@@ -27,6 +27,7 @@ def create_app() -> FastAPI:
     application.include_router(auth_router)
     application.include_router(admin_router)
     application.include_router(documents_router)
+    application.include_router(document_uploads_router)
 
     return application
 
