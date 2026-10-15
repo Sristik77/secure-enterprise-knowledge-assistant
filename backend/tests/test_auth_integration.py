@@ -2,6 +2,7 @@ from collections.abc import Generator
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import URL, create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -11,7 +12,8 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import verify_password
 from app.main import app
-from app.models import User
+from app.api.deps import require_roles
+from app.models import Role, User, UserRole
 
 
 TEST_DATABASE = "secure_knowledge_assistant_test"
@@ -175,3 +177,138 @@ def test_login_rejects_wrong_password(
         },
     )
     assert response.status_code == 401
+
+def test_database_role_grants_access(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    payload = registration_payload()
+    response = integration_client.post("/auth/register", json=payload)
+    assert response.status_code == 201
+
+    user = integration_session.scalar(
+        select(User).where(User.email == payload["email"])
+    )
+    assert user is not None
+
+    role = Role(name=f"rbac_{uuid4().hex[:12]}")
+    integration_session.add(role)
+    integration_session.flush()
+
+    integration_session.add(
+        UserRole(user_id=user.id, role_id=role.id)
+    )
+    integration_session.flush()
+
+    checker = require_roles(role.name)
+    assert checker(current_user=user, db=integration_session) is user
+
+
+def test_database_role_denies_user_without_membership(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    payload = registration_payload()
+    response = integration_client.post("/auth/register", json=payload)
+    assert response.status_code == 201
+
+    user = integration_session.scalar(
+        select(User).where(User.email == payload["email"])
+    )
+    assert user is not None
+
+    checker = require_roles(f"missing_{uuid4().hex[:12]}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        checker(current_user=user, db=integration_session)
+
+    assert exc_info.value.status_code == 403
+
+
+def test_admin_users_requires_authentication(
+    integration_client: TestClient,
+) -> None:
+    response = integration_client.get("/admin/users")
+
+    assert response.status_code == 401
+
+
+def test_admin_users_forbids_user_without_admin_role(
+    integration_client: TestClient,
+) -> None:
+    payload = registration_payload()
+
+    registration = integration_client.post("/auth/register", json=payload)
+    assert registration.status_code == 201
+
+    login = integration_client.post(
+        "/auth/login",
+        json={
+            "email": payload["email"],
+            "password": payload["password"],
+        },
+    )
+    assert login.status_code == 200
+
+    response = integration_client.get(
+        "/admin/users",
+        headers={
+            "Authorization": f"Bearer {login.json()['access_token']}",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_admin_users_allows_admin_and_hides_password_hashes(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    payload = registration_payload()
+
+    registration = integration_client.post("/auth/register", json=payload)
+    assert registration.status_code == 201
+
+    user = integration_session.scalar(
+        select(User).where(User.email == payload["email"])
+    )
+    assert user is not None
+
+    admin_role = integration_session.scalar(
+        select(Role).where(Role.name == "admin")
+    )
+    if admin_role is None:
+        admin_role = Role(name="admin")
+        integration_session.add(admin_role)
+        integration_session.flush()
+
+    membership = UserRole(user_id=user.id, role_id=admin_role.id)
+    integration_session.add(membership)
+    integration_session.flush()
+
+    login = integration_client.post(
+        "/auth/login",
+        json={
+            "email": payload["email"],
+            "password": payload["password"],
+        },
+    )
+    assert login.status_code == 200
+
+    response = integration_client.get(
+        "/admin/users",
+        headers={
+            "Authorization": f"Bearer {login.json()['access_token']}",
+        },
+    )
+
+    assert response.status_code == 200
+
+    users = response.json()
+    returned_user = next(
+        item for item in users if item["email"] == payload["email"]
+    )
+
+    assert returned_user["full_name"] == payload["full_name"]
+    assert "password_hash" not in returned_user
+    assert all("password_hash" not in item for item in users)
