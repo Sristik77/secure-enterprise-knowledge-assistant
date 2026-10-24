@@ -1,3 +1,4 @@
+
 """Request and response schemas for RAG chat."""
 
 from uuid import UUID
@@ -11,6 +12,7 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     limit: int = Field(default=5, ge=1, le=10)
     min_similarity: float = Field(default=0.0, ge=-1.0, le=1.0)
+    conversation_id: UUID | None = None
 
     @field_validator("question")
     @classmethod
@@ -37,3 +39,4 @@ class ChatResponse(BaseModel):
     question: str
     answer: str
     citations: list[ChatCitation]
+    conversation_id: UUID | None = None

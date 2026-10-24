@@ -49,7 +49,7 @@ def integration_session() -> Generator[Session, None, None]:
         revision = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one_or_none()
-        expected_revision = "a13c8e6f4b21"
+        expected_revision = "26ca750b8d1a"
         if revision != expected_revision:
             raise RuntimeError(
                 f"Expected Alembic revision {expected_revision!r}, "

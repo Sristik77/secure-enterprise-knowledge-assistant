@@ -1,7 +1,9 @@
 ﻿from app.models.entities import (
+    Conversation,
     Document,
     DocumentChunk,
     DocumentPermission,
+    Message,
     Role,
     User,
     UserRole,
