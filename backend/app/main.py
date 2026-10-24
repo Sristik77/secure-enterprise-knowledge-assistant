@@ -5,6 +5,7 @@ from app.api.documents import router as documents_router
 from app.api.auth import router as auth_router
 from app.api.search import router as search_router
 from app.core.config import get_settings
+from app.api.chat import router as chat_router
 
 
 def create_app() -> FastAPI:
@@ -30,6 +31,7 @@ def create_app() -> FastAPI:
     application.include_router(documents_router)
     application.include_router(document_uploads_router)
     application.include_router(search_router)
+    application.include_router(chat_router)
 
     return application
 

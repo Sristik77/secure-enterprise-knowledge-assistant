@@ -43,6 +43,14 @@ class Settings(BaseSettings):
         le=1440,
         validation_alias="ACCESS_TOKEN_EXPIRE_MINUTES",
     )
+    groq_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="GROQ_API_KEY",
+    )
+    groq_model: str = Field(
+        default="openai/gpt-oss-20b",
+        validation_alias="GROQ_MODEL",
+    )
 
 
 @lru_cache(maxsize=1)

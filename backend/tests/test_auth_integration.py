@@ -1,4 +1,4 @@
-from collections.abc import Generator
+﻿from collections.abc import Generator
 from uuid import UUID, uuid4
 
 import pytest
@@ -952,4 +952,160 @@ def test_search_rejects_blank_query(
         json={"query": "   "},
     )
 
+    assert response.status_code == 422
+
+# RAG chat integration tests
+
+
+def test_chat_requires_authentication(
+    integration_client: TestClient,
+) -> None:
+    response = integration_client.post(
+        "/chat",
+        json={"question": "What does the policy say?"},
+    )
+    assert response.status_code == 401
+
+
+def test_chat_returns_fallback_when_no_authorized_chunks(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import chat as chat_api
+    from app.services import retrieval
+
+    _, owner, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    create_test_document(integration_session, owner)
+
+    monkeypatch.setattr(
+        retrieval, "embed_texts",
+        lambda texts: [[1.0] + [0.0] * 383],
+    )
+
+    def unexpected_llm_call(question: str, context: str) -> str:
+        pytest.fail("LLM must not be called without authorized chunks.")
+
+    monkeypatch.setattr(
+        chat_api, "generate_answer", unexpected_llm_call
+    )
+
+    response = integration_client.post(
+        "/chat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"question": "What does the policy say?"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["citations"] == []
+    assert "don't have enough information" in body["answer"]
+
+
+def test_chat_returns_answer_and_source_citations(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import chat as chat_api
+    from app.services import retrieval
+
+    _, owner, token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    document = create_test_document(
+        integration_session, owner, title="Employee Security Policy"
+    )
+    set_test_embedding(
+        integration_session, document, [1.0] + [0.0] * 383
+    )
+    monkeypatch.setattr(
+        retrieval, "embed_texts",
+        lambda texts: [[1.0] + [0.0] * 383],
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_generate_answer(question: str, context: str) -> str:
+        captured["question"] = question
+        captured["context"] = context
+        return "Employees must follow the security policy."
+
+    monkeypatch.setattr(
+        chat_api, "generate_answer", fake_generate_answer
+    )
+
+    response = integration_client.post(
+        "/chat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"question": "What must employees follow?"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "Employees must follow the security policy."
+    assert len(body["citations"]) == 1
+    citation = body["citations"][0]
+    assert citation["document_id"] == str(document.id)
+    assert citation["document_title"] == "Employee Security Policy"
+    assert citation["chunk_index"] == 0
+    assert captured["question"] == "What must employees follow?"
+    assert "Confidential integration-test content." in captured["context"]
+
+
+def test_chat_does_not_send_private_document_to_llm(
+    integration_client: TestClient,
+    integration_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import chat as chat_api
+    from app.services import retrieval
+
+    _, owner, _ = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+    _, reader, reader_token = create_authenticated_test_user(
+        integration_client, integration_session
+    )
+
+    private_document = create_test_document(
+        integration_session, owner, title="Private Employee Record"
+    )
+    set_test_embedding(
+        integration_session, private_document, [1.0] + [0.0] * 383
+    )
+    monkeypatch.setattr(
+        retrieval, "embed_texts",
+        lambda texts: [[1.0] + [0.0] * 383],
+    )
+
+    def unexpected_llm_call(question: str, context: str) -> str:
+        pytest.fail("Private document content reached the LLM.")
+
+    monkeypatch.setattr(
+        chat_api, "generate_answer", unexpected_llm_call
+    )
+
+    response = integration_client.post(
+        "/chat",
+        headers={"Authorization": f"Bearer {reader_token}"},
+        json={"question": "Summarize the employee record."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["citations"] == []
+    assert "Private Employee Record" not in response.json()["answer"]
+
+
+def test_chat_rejects_blank_question(
+    integration_client: TestClient,
+) -> None:
+    token = authenticated_user_token(integration_client)
+    response = integration_client.post(
+        "/chat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"question": "   "},
+    )
     assert response.status_code == 422
