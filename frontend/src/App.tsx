@@ -4,14 +4,18 @@ import {
   Activity,
   ArrowUp,
   BookOpen,
+  Check,
   FileText,
   LockKeyhole,
   LogOut,
   MessageSquare,
+  Pencil,
   Plus,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UserRound,
+  X,
 } from "lucide-react";
 import "./index.css";
 
@@ -247,7 +251,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-
+  const [editingConversationId, setEditingConversationId] =useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   // Validate the current login token.
   useEffect(() => {
     let active = true;
@@ -399,7 +405,81 @@ export default function App() {
     setQuestion("");
     setError("");
   }
+  async function renameConversation(id: string) {
+    const title = editingTitle.trim();
 
+    if (!title || !token || savingTitle) return;
+
+    setSavingTitle(true);
+    setError("");
+
+    try {
+      const updated = await apiRequest<ConversationSummary>(
+        `/conversations/${id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ title }),
+        },
+        token
+      );
+
+      setConversations((previous) =>
+        previous.map((conversation) =>
+          conversation.id === id ? updated : conversation
+        )
+      );
+
+      setEditingConversationId(null);
+      setEditingTitle("");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Unable to rename conversation."
+      );
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+  async function deleteConversation(id: string) {
+  if (!token || busy) return;
+
+  const conversation = conversations.find((item) => item.id === id);
+  if (!conversation) return;
+
+  const confirmed = window.confirm(
+    `Delete "${conversation.title}" and its messages? This cannot be undone.`
+  );
+
+  if (!confirmed) return;
+
+  setError("");
+
+  try {
+    await apiRequest<void>(
+      `/conversations/${id}`,
+      { method: "DELETE" },
+      token
+    );
+
+    setConversations((previous) =>
+      previous.filter((item) => item.id !== id)
+    );
+
+    if (activeConversationId === id) {
+      setActiveConversationId(null);
+      setMessages([]);
+      setQuestion("");
+    }
+
+    if (editingConversationId === id) {
+      setEditingConversationId(null);
+      setEditingTitle("");
+    }
+  } catch (err) {
+    setError(
+      err instanceof Error ? err.message : "Unable to delete conversation."
+    );
+  }
+}
   async function sendQuestion(text = question) {
     const clean = text.trim();
 
@@ -516,25 +596,101 @@ export default function App() {
               Your saved conversations will appear here.
             </p>
           ) : (
-            <div className="history-list">
-              {conversations.map((conversation) => (
-                <button
-                  type="button"
-                  key={conversation.id}
-                  className={`history-item ${
-                    activeConversationId === conversation.id
-                      ? "selected"
-                      : ""
-                  }`}
-                  onClick={() => void openConversation(conversation.id)}
-                  disabled={busy}
-                  title={conversation.title}
-                >
-                  <MessageSquare size={15} />
-                  <span>{conversation.title}</span>
-                </button>
-              ))}
-            </div>
+            
+<div className="history-list">
+  {conversations.map((conversation) => (
+    <div
+      className={`history-row ${
+        activeConversationId === conversation.id ? "selected" : ""
+      }`}
+      key={conversation.id}
+    >
+      {editingConversationId === conversation.id ? (
+        <form
+          className="history-edit-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void renameConversation(conversation.id);
+          }}
+        >
+          <input
+            autoFocus
+            value={editingTitle}
+            onChange={(event) => setEditingTitle(event.target.value)}
+            maxLength={200}
+            aria-label="Conversation title"
+            disabled={savingTitle}
+          />
+          <button
+            className="history-action"
+            type="submit"
+            title="Save title"
+            aria-label="Save title"
+            disabled={!editingTitle.trim() || savingTitle}
+          >
+            <Check size={15} />
+          </button>
+          <button
+            className="history-action"
+            type="button"
+            title="Cancel rename"
+            aria-label="Cancel rename"
+            onClick={() => {
+              setEditingConversationId(null);
+              setEditingTitle("");
+            }}
+            disabled={savingTitle}
+          >
+            <X size={15} />
+          </button>
+        </form>
+      ) : (
+        <>
+          <button
+            type="button"
+            className={`history-item ${
+              activeConversationId === conversation.id ? "selected" : ""
+            }`}
+            onClick={() => void openConversation(conversation.id)}
+            disabled={busy}
+            title={conversation.title}
+          >
+            <MessageSquare size={15} />
+            <span>{conversation.title}</span>
+          </button>
+
+          <div className="history-actions">
+            <button
+              className="history-action"
+              type="button"
+              title="Rename conversation"
+              aria-label={`Rename ${conversation.title}`}
+              disabled={busy}
+              onClick={() => {
+                setEditingConversationId(conversation.id);
+                setEditingTitle(conversation.title);
+              }}
+            >
+              <Pencil size={14} />
+            </button>
+
+            <button
+              className="history-action delete-action"
+              type="button"
+              title="Delete conversation"
+              aria-label={`Delete ${conversation.title}`}
+              disabled={busy}
+              onClick={() => void deleteConversation(conversation.id)}
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  ))}
+</div>
+
           )}
         </div>
 
