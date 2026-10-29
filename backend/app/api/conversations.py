@@ -1,9 +1,8 @@
-
 """Authenticated conversation history endpoints."""
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -13,6 +12,7 @@ from app.schemas.conversations import (
     ConversationCreate,
     ConversationDetail,
     ConversationSummary,
+    ConversationUpdate,
 )
 
 router = APIRouter(prefix="/conversations", tags=["Conversation history"])
@@ -30,12 +30,13 @@ def _owned_conversation(
         .options(selectinload(Conversation.messages))
     )
     conversation = db.scalar(statement)
+
     if conversation is None:
-        # Do not reveal whether another user's conversation exists.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conversation not found.",
         )
+
     return conversation
 
 
@@ -51,7 +52,7 @@ def create_conversation(
 ) -> Conversation:
     conversation = Conversation(
         user_id=current_user.id,
-        title=payload.title.strip() or "New conversation",
+        title=payload.title,
     )
     db.add(conversation)
     db.commit()
@@ -79,3 +80,39 @@ def get_conversation(
     current_user: User = Depends(get_current_user),
 ) -> Conversation:
     return _owned_conversation(db, conversation_id, current_user.id)
+
+
+@router.patch(
+    "/{conversation_id}",
+    response_model=ConversationSummary,
+)
+def rename_conversation(
+    conversation_id: UUID,
+    payload: ConversationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Conversation:
+    conversation = _owned_conversation(
+        db, conversation_id, current_user.id
+    )
+    conversation.title = payload.title
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
+@router.delete(
+    "/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_conversation(
+    conversation_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    conversation = _owned_conversation(
+        db, conversation_id, current_user.id
+    )
+    db.delete(conversation)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

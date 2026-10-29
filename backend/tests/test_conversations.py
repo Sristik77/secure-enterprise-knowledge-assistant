@@ -183,3 +183,174 @@ def test_conversation_detail_returns_persisted_messages(
     assert body["messages"][0]["content"] == "What is the policy?"
     assert body["messages"][1]["role"] == "assistant"
     assert body["messages"][1]["citations"] == citations
+def test_owner_can_rename_conversation(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, token = register_and_login(integration_client)
+    headers = auth_headers(token)
+
+    created = integration_client.post(
+        "/conversations",
+        json={"title": "Old title"},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+
+    conversation_id = UUID(created.json()["id"])
+
+    response = integration_client.patch(
+        f"/conversations/{conversation_id}",
+        json={"title": "  Updated title  "},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["title"] == "Updated title"
+
+    stored = integration_session.get(Conversation, conversation_id)
+    assert stored is not None
+    assert stored.title == "Updated title"
+
+
+def test_rename_rejects_blank_title(
+    integration_client: TestClient,
+) -> None:
+    _, token = register_and_login(integration_client)
+    headers = auth_headers(token)
+
+    created = integration_client.post(
+        "/conversations",
+        json={"title": "Keep this title"},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+
+    response = integration_client.patch(
+        f"/conversations/{created.json()['id']}",
+        json={"title": "   "},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+
+
+def test_user_cannot_rename_another_users_conversation(
+    integration_client: TestClient,
+) -> None:
+    _, owner_token = register_and_login(integration_client)
+    _, other_token = register_and_login(integration_client)
+
+    created = integration_client.post(
+        "/conversations",
+        json={"title": "Owner title"},
+        headers=auth_headers(owner_token),
+    )
+    assert created.status_code == 201, created.text
+
+    response = integration_client.patch(
+        f"/conversations/{created.json()['id']}",
+        json={"title": "Unauthorized change"},
+        headers=auth_headers(other_token),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation not found."
+
+    owner_listing = integration_client.get(
+        "/conversations",
+        headers=auth_headers(owner_token),
+    )
+    assert owner_listing.status_code == 200
+    assert owner_listing.json()[0]["title"] == "Owner title"
+
+
+def test_rename_requires_authentication(
+    integration_client: TestClient,
+) -> None:
+    response = integration_client.patch(
+        "/conversations/00000000-0000-0000-0000-000000000001",
+        json={"title": "Unauthorized"},
+    )
+
+    assert response.status_code in (401, 403)
+
+
+def test_owner_can_delete_conversation_and_messages(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, token = register_and_login(integration_client)
+    headers = auth_headers(token)
+
+    created = integration_client.post(
+        "/conversations",
+        json={"title": "Conversation to delete"},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+
+    conversation_id = UUID(created.json()["id"])
+
+    conversation = integration_session.get(
+        Conversation, conversation_id
+    )
+    assert conversation is not None
+
+    message = Message(
+        conversation_id=conversation_id,
+        role="user",
+        content="Test message",
+        citations=[],
+    )
+    integration_session.add(message)
+    integration_session.flush()
+    message_id = message.id
+
+    response = integration_client.delete(
+        f"/conversations/{conversation_id}",
+        headers=headers,
+    )
+
+    assert response.status_code == 204
+    assert integration_session.get(Conversation, conversation_id) is None
+    assert integration_session.get(Message, message_id) is None
+
+
+def test_user_cannot_delete_another_users_conversation(
+    integration_client: TestClient,
+    integration_session: Session,
+) -> None:
+    _, owner_token = register_and_login(integration_client)
+    _, other_token = register_and_login(integration_client)
+
+    created = integration_client.post(
+        "/conversations",
+        json={"title": "Keep this conversation"},
+        headers=auth_headers(owner_token),
+    )
+    assert created.status_code == 201, created.text
+
+    conversation_id = UUID(created.json()["id"])
+
+    response = integration_client.delete(
+        f"/conversations/{conversation_id}",
+        headers=auth_headers(other_token),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation not found."
+
+    stored = integration_session.get(Conversation, conversation_id)
+    assert stored is not None
+    assert stored.title == "Keep this conversation"
+
+
+def test_delete_requires_authentication(
+    integration_client: TestClient,
+) -> None:
+    response = integration_client.delete(
+        "/conversations/00000000-0000-0000-0000-000000000001",
+    )
+
+    assert response.status_code in (401, 403)
